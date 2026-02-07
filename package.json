@@ -1,0 +1,29 @@
+{
+  "name": "slack-realestate-bot",
+  "version": "1.0.0",
+  "description": "슬랙 연동 등기부등본·건축물대장 자동출력 도구",
+  "main": "dist/app.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/app.js",
+    "dev": "nodemon --watch src --exec ts-node src/app.ts",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": ["slack", "bot", "real-estate", "등기부등본", "건축물대장"],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "@slack/bolt": "^4.6.0",
+    "axios": "^1.13.4",
+    "dotenv": "^17.2.4",
+    "uuid": "^13.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^25.2.1",
+    "@types/uuid": "^10.0.0",
+    "nodemon": "^3.1.11",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.9.3"
+  }
+}

@@ -1,0 +1,45 @@
+# Environment variables (중요: API 키, 비밀번호 등 포함)
+.env
+
+# Dependencies
+node_modules/
+package-lock.json
+
+# Build outputs
+dist/
+build/
+*.js
+*.js.map
+
+# TypeScript cache
+.ts-node/
+*.tsbuildinfo
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+
+# Temporary files
+temp/
+*.tmp
+*.pdf
+*.xml
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Test files
+test-*.ts
+
+# RSA keys (보안)
+*.pem
