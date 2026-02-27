@@ -221,7 +221,7 @@ export class TilkoApiService {
    * @param address 파싱된 주소 정보
    * @param buildingNumber 건물관리번호 (14자리) - PIN으로 사용됨
    */
-  async fetchRegistry(address: ParsedAddress, buildingNumber?: string): Promise<string> {
+  async fetchRegistry(address: ParsedAddress, buildingNumber?: string): Promise<{ filePath: string; pointBalance: number | null }> {
     console.log('등기부등본 조회 시작 (Tilko API v2.0):', address.fullAddress);
 
     // API 키 및 로그인 정보 확인
@@ -255,10 +255,10 @@ export class TilkoApiService {
         EmoneyNo1: this.encryptAES(this.irosEmoneyNo1),
         EmoneyNo2: this.encryptAES(this.irosEmoneyNo2),
         EmoneyPwd: this.encryptAES(this.irosEmoneyPwd),
-        // 추가 필드 - 빈 문자열은 평문 (데모 확인)
+        // 추가 필드 - 평문 (데모 확인)
         AbsCls: '',
         CmortFlag: '',
-        RgsMttrSmry: '',
+        RgsMttrSmry: '1',  // 등기사항요약 페이지 포함
         TradeSeqFlag: '',
       };
 
@@ -298,7 +298,7 @@ export class TilkoApiService {
       console.log('등기부등본 조회 완료 (Tilko):', pdfPath);
       console.log('남은 포인트:', result.PointBalance);
 
-      return pdfPath;
+      return { filePath: pdfPath, pointBalance: result.PointBalance ?? null };
 
     } catch (error: any) {
       console.error('Tilko API 조회 실패:', error.message);

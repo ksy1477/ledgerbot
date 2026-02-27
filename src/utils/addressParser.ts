@@ -2,34 +2,59 @@ import { ParsedAddress } from '../types';
 
 /**
  * 자연어 주소를 파싱하여 구조화된 주소 정보로 변환
- * 예: "서울시 중랑구 중화동 450 중화한신아파트 103동 904호"
+ *
+ * 지원 패턴:
+ *   "서울시 중랑구 중화동 450 103동 904호"         → 시도(1) 시군구(1) 읍면동 지번
+ *   "경기도 수원시 영통구 망포동 686 108동 1305호"  → 시도(1) 시군구(2) 읍면동 지번
+ *   "충남 천안시 서북구 쌍용동 100"                 → 시도(1) 시군구(2) 읍면동 지번
  */
 export function parseAddress(rawAddress: string): ParsedAddress | null {
   try {
-    // 공백 기준으로 분리
     const parts = rawAddress.trim().split(/\s+/);
 
     if (parts.length < 3) {
       return null;
     }
 
-    // 기본 파싱 (MVP용 간단한 구현)
-    const sido = parts[0].replace(/(특별시|광역시|시|도)$/, '$&');
-    const sigungu = parts[1];
-    const eupmyeondong = parts[2];
-    const jibun = parts[3] || '';
+    let idx = 0;
 
-    // 건물명, 동, 호 추출 (선택적)
+    // 1) 시도
+    const sido = parts[idx++];
+
+    // 2) 시군구: "수원시 영통구", "성남시 분당구" 등 시+구 패턴 처리
+    let sigungu = parts[idx++];
+    // 다음 파트가 "~구"이고 현재 시군구가 "~시"로 끝나면 합치기
+    if (idx < parts.length && /구$/.test(parts[idx]) && /시$/.test(sigungu)) {
+      sigungu += ' ' + parts[idx++];
+    }
+
+    // 3) 읍면동
+    const eupmyeondong = parts[idx++] || '';
+
+    // 3-1) 중복 읍면동 스킵 (예: "철산동 철산동 55-1")
+    if (idx < parts.length && parts[idx] === eupmyeondong) {
+      idx++;
+    }
+
+    // 4) 지번 (숫자 또는 숫자-숫자 패턴)
+    let jibun = '';
+    if (idx < parts.length && /^\d+(-\d+)?$/.test(parts[idx])) {
+      jibun = parts[idx++];
+    }
+
+    // 5) 나머지에서 건물명, 동, 호 추출
     let buildingName: string | undefined;
     let dong: string | undefined;
     let ho: string | undefined;
 
-    for (let i = 4; i < parts.length; i++) {
+    for (let i = idx; i < parts.length; i++) {
       const part = parts[i];
       if (part.match(/\d+동$/)) {
         dong = part;
       } else if (part.match(/\d+호$/)) {
         ho = part;
+      } else if (!jibun && /^\d+(-\d+)?$/.test(part)) {
+        jibun = part;
       } else if (!buildingName) {
         buildingName = part;
       }
