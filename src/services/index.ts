@@ -27,10 +27,11 @@ export class UnifiedRegistryService {
   /**
    * 등기부등본 조회 (2단계 프로세스)
    */
-  async fetchRegistry(address: ParsedAddress): Promise<string> {
+  async fetchRegistry(address: ParsedAddress): Promise<{ filePath: string; pointBalance: number | null }> {
     // Mock 모드인 경우 바로 Mock 서비스 호출
     if (this.service instanceof RegistryService) {
-      return this.service.fetchRegistry(address);
+      const filePath = await this.service.fetchRegistry(address);
+      return { filePath, pointBalance: null };
     }
 
     // 실제 API 모드: 2단계 프로세스
