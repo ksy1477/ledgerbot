@@ -55,7 +55,7 @@ export class UnifiedBuildingService {
     console.log(`  지번 파싱: bun=${bun}, ji=${ji}${overrideBun ? ' (BldRgstMst 주소코드 사용)' : ' (사용자 입력)'}`);
 
     const resolved = await this.tilkoBuildingService.resolveBuildingPkFromPublicData(
-      sigunguCd, bjdongCd, bun, ji, address.dong!
+      sigunguCd, bjdongCd, bun, ji, address.dong || ''
     );
 
     if (!resolved) return null;
@@ -66,7 +66,10 @@ export class UnifiedBuildingService {
     };
   }
 
-  async fetchBuildingLedger(address: ParsedAddress): Promise<{
+  async fetchBuildingLedger(
+    address: ParsedAddress,
+    ledgerType: '전유부' | '표제부' = '전유부'
+  ): Promise<{
     filePath: string;
     pointBalance?: number;
     cost: number;
@@ -74,10 +77,10 @@ export class UnifiedBuildingService {
     geminiUsed?: boolean;
   }> {
     console.log('='.repeat(60));
-    console.log('건축물대장(전유부) 조회 시작:', address.fullAddress);
+    console.log(`건축물대장(${ledgerType}) 조회 시작:`, address.fullAddress);
     console.log('='.repeat(60));
 
-    if (!address.dong || !address.ho) {
+    if (ledgerType === '전유부' && (!address.dong || !address.ho)) {
       throw new Error('전유부 건축물대장은 동/호가 필요합니다.');
     }
 
@@ -156,14 +159,15 @@ export class UnifiedBuildingService {
       // ────────────────────────────────────────
       // 2단계: 상세정보 조회 → 특정 동/호 매칭 (20pt)
       // ────────────────────────────────────────
-      console.log('\n[2/3] 상세정보 조회 (BldRgstDtl, 20pt)...');
+      console.log(`\n[2/3] 상세정보 조회 (BldRgstDtl, 20pt, ${ledgerType})...`);
       let detailResult = await this.tilkoBuildingService.searchBuildingDetail(
         detailSeqno,
         detailUntClsfCd,
         '',
         '',
-        address.dong,
-        address.ho
+        address.dong || '',
+        address.ho || '',
+        ledgerType
       );
 
       // ────────────────────────────────────────
@@ -181,8 +185,9 @@ export class UnifiedBuildingService {
           searchResult.untClsfCd,
           '',
           '',
-          address.dong,
-          address.ho
+          address.dong || '',
+          address.ho || '',
+          ledgerType
         );
         if (detailResult) {
           totalCost += 20;
@@ -198,8 +203,9 @@ export class UnifiedBuildingService {
             searchResult.untClsfCd,
             '',
             '',
-            address.dong,
-            address.ho
+            address.dong || '',
+            address.ho || '',
+            ledgerType
           );
           if (detailResult) {
             totalCost += 20;
@@ -213,7 +219,6 @@ export class UnifiedBuildingService {
       if (!detailResult && !usedPublicDataFallback) {
         console.log('\n[2-fallback-B] BLDG PK 실패 → 주소정보 API + 공공데이터 API로 재시도...');
 
-        // 주소정보 API로 법정동코드 조회 (무료)
         const codes = await this.tilkoBuildingService.lookupAddressCodes(address);
         if (codes) {
           const resolved = await this.resolveWithPublicData(codes.sigunguCd, codes.bjdongCd, address);
@@ -225,18 +230,20 @@ export class UnifiedBuildingService {
               resolved.detailUntClsfCd,
               '',
               '',
-              address.dong,
-              address.ho
+              address.dong || '',
+              address.ho || '',
+              ledgerType
             );
             if (detailResult) {
-              totalCost += 20; // 재시도 BldRgstDtl 비용
+              totalCost += 20;
             }
           }
         }
       }
 
       if (!detailResult || !detailResult.bldRgstSeqno) {
-        throw new Error(`${address.dong} ${address.ho}를 찾을 수 없습니다. 동/호를 확인해주세요.`);
+        const what = ledgerType === '표제부' ? '표제부 정보' : `${address.dong} ${address.ho}`;
+        throw new Error(`${what}를 찾을 수 없습니다. 주소를 확인해주세요.`);
       }
 
       totalCost += 20;
@@ -263,8 +270,8 @@ export class UnifiedBuildingService {
       totalCost += 100;
 
       console.log('\n' + '='.repeat(60));
-      console.log('건축물대장(전유부) 조회 완료!');
-      console.log(`  ${detailResult.bldNm} ${detailResult.dongNm} ${detailResult.hoNm}`);
+      console.log(`건축물대장(${ledgerType}) 조회 완료!`);
+      console.log(`  ${detailResult.bldNm} ${detailResult.dongNm || ''} ${detailResult.hoNm || ''}`);
       console.log(`  비용: ${totalCost}pt`);
       console.log(`  잔액: ${pdfResult.pointBalance?.toLocaleString() || '확인불가'}pt`);
       console.log('='.repeat(60));
@@ -273,7 +280,7 @@ export class UnifiedBuildingService {
         filePath: pdfResult.filePath,
         pointBalance: pdfResult.pointBalance,
         cost: totalCost,
-        buildingType: '전유부',
+        buildingType: ledgerType,
         geminiUsed,
       };
 

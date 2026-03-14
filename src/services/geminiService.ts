@@ -2,11 +2,12 @@ import axios from 'axios';
 import { ParsedAddress } from '../types';
 
 /**
- * Gemini API 서비스 - 건축물 주소 매칭 폴백
+ * Gemini API 서비스 - AI 기반 주소 매칭 보정
  *
  * 기존 정규식/스코어링 로직이 실패할 때만 호출
  * - BldRgstMst 결과 중 정확한 건물 선택
  * - BldRgstDtl 동 이름 매칭
+ * - 등기부등본 PIN 검색 최적화 (검색어 추천, 결과 선택)
  */
 export class GeminiService {
   private apiKey: string;
@@ -126,6 +127,119 @@ If no match is possible, return { "matchedDong": "", "reason": "매칭 불가" }
 
     if (result && result.matchedDong) {
       console.log(`  [Gemini] 동 매칭: "${result.matchedDong}" (${result.reason})`);
+      return result;
+    }
+
+    return null;
+  }
+
+  /**
+   * 등기부등본 PIN 검색 최적화:
+   * 검색 결과 1페이지와 사용자 주소를 보고, 최적의 재검색어를 추천
+   *
+   * 사용 시점: 직접검색(건물명+동+호, 지번+동+호) 실패 후
+   * 결과가 너무 많거나(100+페이지) 매칭이 안 될 때
+   */
+  async suggestBetterSearchTerm(
+    address: ParsedAddress,
+    currentSearchTerm: string,
+    firstPageResults: any[],
+    totalPages: number
+  ): Promise<{ searchTerm: string; reason: string } | null> {
+    console.log(`  [Gemini] 검색어 최적화 요청 (현재: "${currentSearchTerm}", ${totalPages}페이지)...`);
+
+    const simplifiedResults = firstPageResults.slice(0, 5).map((item: any) => ({
+      name: item.buld_name || '',
+      dong: item.buld_no_buld || '',
+      room: item.buld_no_room || '',
+      type: item.real_cls_cd || '',
+      address: (item.real_indi_cont || '').replace(/<[^>]+>/g, '').substring(0, 80),
+    }));
+
+    const systemInstruction = `You are a Korean real estate registry search expert.
+The user is searching for a specific apartment unit's registry PIN using the Korean internet registry (인터넷등기소) search API.
+
+The current search returned too many results (${totalPages} pages) or wrong results.
+Analyze the first page results and suggest a better, more specific search term.
+
+Key strategies:
+- If building name is visible in results, use: "건물명 동 호" (e.g., "삼성래미안 118동 1502호")
+- If road address is visible, use: "도로명 동 호" (e.g., "관악대로 135 118동 1502호")
+- Include dong(동) and ho(호) in search for precise matching
+- The search API accepts Korean building names, road addresses, and unit numbers
+
+Return JSON: { "searchTerm": "<optimized search term>", "reason": "<brief Korean explanation>" }
+If no improvement is possible, return { "searchTerm": "", "reason": "개선 불가" }`;
+
+    const userPrompt = JSON.stringify({
+      userAddress: {
+        fullAddress: address.fullAddress,
+        dong: address.dong || '',
+        ho: address.ho || '',
+        buildingName: (address as any).buildingName || '',
+      },
+      currentSearch: currentSearchTerm,
+      totalPages,
+      firstPageSamples: simplifiedResults,
+    });
+
+    const result = await this.generateJson(systemInstruction, userPrompt);
+
+    if (result?.searchTerm) {
+      console.log(`  [Gemini] 추천 검색어: "${result.searchTerm}" (${result.reason})`);
+      return result;
+    }
+
+    return null;
+  }
+
+  /**
+   * 등기부등본 PIN 검색 결과에서 최적 매칭 선택
+   *
+   * 사용 시점: 동/호 정규식 매칭 실패 후, 1페이지 결과 중에서 AI로 최적 선택
+   */
+  async selectRegistryPin(
+    address: ParsedAddress,
+    resultList: any[]
+  ): Promise<{ selectedIndex: number; pin: string; reason: string } | null> {
+    console.log(`  [Gemini] 등기 PIN 선택 요청 (${resultList.length}건)...`);
+
+    const simplifiedResults = resultList.slice(0, 10).map((item: any, i: number) => ({
+      index: i,
+      pin: item.pin || '',
+      name: item.buld_name || '',
+      dong: item.buld_no_buld || '',
+      room: item.buld_no_room || '',
+      type: item.real_cls_cd || '',
+      address: (item.real_indi_cont || '').replace(/<[^>]+>/g, '').substring(0, 80),
+    }));
+
+    const systemInstruction = `You are a Korean real estate registry matching expert.
+The user wants a specific apartment unit's registry. Select the most accurate match from the search results.
+
+Matching rules:
+- Match 동(dong) number exactly: user's "106동" should match dong="106"
+- Match 호(ho/room) number exactly: user's "1506호" should match room="1506"
+- Prefer type="집합건물" (apartment unit) over "토지"(land) or "건물"(building)
+- If the user specified a building name, match it too
+
+Return JSON: { "selectedIndex": <number>, "pin": "<pin value>", "reason": "<brief Korean explanation>" }
+If no match, return { "selectedIndex": -1, "pin": "", "reason": "매칭 불가" }`;
+
+    const userPrompt = JSON.stringify({
+      userAddress: {
+        fullAddress: address.fullAddress,
+        dong: address.dong || '',
+        ho: address.ho || '',
+        buildingName: (address as any).buildingName || '',
+      },
+      results: simplifiedResults,
+    });
+
+    const result = await this.generateJson(systemInstruction, userPrompt);
+
+    if (result && typeof result.selectedIndex === 'number' && result.selectedIndex >= 0) {
+      console.log(`  [Gemini] PIN 선택: [${result.selectedIndex}] ${result.pin} (${result.reason})`);
       return result;
     }
 

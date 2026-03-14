@@ -321,7 +321,7 @@ export class TilkoBuildingService {
 
       // dongFilter와 매칭되는 동 찾기
       // dongFilter: "115동" → dongNm: "115동" 또는 "115"
-      const dongKey = dongFilter.replace(/동$/, '');
+      const dongKey = (dongFilter || '').replace(/동$/, '');
       const matched = itemList.find((item: any) => {
         const itemDong = (item.dongNm || '').replace(/동$/, '');
         if (itemDong === dongKey) return true;
@@ -378,13 +378,17 @@ export class TilkoBuildingService {
    * API: POST /api/v2.0/EaisIdLogin/BldRgstDtl
    * 비용: 20 포인트
    */
+  /**
+   * @param ledgerType '전유부' | '표제부' — 전유부: 동/호 매칭(RegstrKindCd=4), 표제부: 건물 전체(RegstrKindCd=1,2)
+   */
   async searchBuildingDetail(
     bldRgstSeqno: string,
     untClsfCd: string,
     bldMnnm: string = '',
     bldSlno: string = '',
     dongFilter: string = '',
-    hoFilter: string = ''
+    hoFilter: string = '',
+    ledgerType: '전유부' | '표제부' = '전유부'
   ): Promise<{
     regstrKindCd: string;
     regstrKindNm: string;
@@ -409,32 +413,67 @@ export class TilkoBuildingService {
       throw new Error('Tilko API 키 또는 세움터 로그인 정보가 설정되지 않았습니다.');
     }
 
-    try {
-      const encKey = await this.getEncryptedAesKey();
+    // 세움터 서버 간헐적 장애 대비 최대 3회 재시도
+    let result: any = null;
+    let lastError: Error | null = null;
 
-      const requestData: any = {
-        Auth: {
-          UserId: this.encryptAES(this.eaisUserId),
-          UserPassword: this.encryptAES(this.eaisPassword),
-        },
-        BldRgstSeqNumber: bldRgstSeqno,
-        UntClsfCd: untClsfCd,
-        BldMnnm: bldMnnm || '',
-        BldSlno: bldSlno || '',
-      };
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        const encKey = await this.getEncryptedAesKey();
 
-      console.log('BldRgstDtl API 호출 중...');
+        const requestData: any = {
+          Auth: {
+            UserId: this.encryptAES(this.eaisUserId),
+            UserPassword: this.encryptAES(this.eaisPassword),
+          },
+          BldRgstSeqNumber: bldRgstSeqno,
+          UntClsfCd: untClsfCd,
+          BldMnnm: bldMnnm || '',
+          BldSlno: bldSlno || '',
+        };
 
-      const response = await this.apiClient.post('/api/v2.0/EaisIdLogin/BldRgstDtl', requestData, {
-        headers: { 'ENC-KEY': encKey }
-      });
+        console.log(`BldRgstDtl API 호출 중... (시도 ${attempt}/3)`);
 
-      const result = response.data;
+        const response = await this.apiClient.post('/api/v2.0/EaisIdLogin/BldRgstDtl', requestData, {
+          headers: { 'ENC-KEY': encKey }
+        });
 
-      if (result.ErrorCode && result.ErrorCode !== 0 && result.ErrorCode !== '0') {
-        throw new Error(`BldRgstDtl 에러: ${result.Message || result.ErrorCode}`);
+        result = response.data;
+
+        if (result.ErrorCode && result.ErrorCode !== 0 && result.ErrorCode !== '0') {
+          const errMsg = result.Message || result.ErrorCode;
+          // 서버 통신 오류는 재시도 대상
+          if (String(errMsg).includes('통신') && attempt < 3) {
+            console.warn(`  ⚠️ 서버 통신 오류 (시도 ${attempt}/3) → ${5 * attempt}초 후 재시도...`);
+            await new Promise(r => setTimeout(r, 5000 * attempt));
+            continue;
+          }
+          throw new Error(`BldRgstDtl 에러: ${errMsg}`);
+        }
+
+        break; // 성공 시 루프 탈출
+      } catch (error: any) {
+        lastError = error;
+        if (attempt < 3 && (error.code === 'ECONNRESET' || error.code === 'ETIMEDOUT' || String(error.message).includes('통신'))) {
+          console.warn(`  ⚠️ 네트워크 오류 (시도 ${attempt}/3) → ${5 * attempt}초 후 재시도...`);
+          await new Promise(r => setTimeout(r, 5000 * attempt));
+          continue;
+        }
+        console.error('BldRgstDtl 조회 실패:', error.message);
+        if (error.response) {
+          console.error('응답 상태:', error.response.status);
+          console.error('응답 데이터:', JSON.stringify(error.response.data, null, 2));
+        }
+        return null;
       }
+    }
 
+    if (!result) {
+      console.error('BldRgstDtl 최대 재시도 초과:', lastError?.message);
+      return null;
+    }
+
+    try {
       const resultList = result.Result;
       if (!resultList || resultList.length === 0) {
         console.warn('건축물 상세 정보를 찾을 수 없습니다.');
@@ -442,44 +481,62 @@ export class TilkoBuildingService {
       }
 
       console.log(`  전체 결과 수: ${resultList.length}건`);
+      console.log(`  조회 유형: ${ledgerType}`);
 
-      // dong+ho 필터가 있으면 매칭되는 전유부를 찾음
+      const extractKey = (s: string): string =>
+        (s || '').trim().replace(/^제/, '').replace(/^\d+층\s*/, '').replace(/[동호]$/, '').replace(/^0+/, '') || '0';
+
+      const normalizeDong = (apiDong: string | null | undefined, userDong: string): boolean => {
+        const apiKey = extractKey(apiDong || '');
+        const userKey = extractKey(userDong);
+        if (apiKey === userKey) return true;
+        const apiNumMatch = (apiDong || '').match(/(\d+)/);
+        const userNumMatch = (userDong || '').match(/(\d+)/);
+        if (apiNumMatch && userNumMatch) {
+          if (userNumMatch[1].endsWith(apiNumMatch[1]) || apiNumMatch[1].endsWith(userNumMatch[1])) return true;
+        }
+        return false;
+      };
+
       let matchedItem = resultList[0];
 
-      if (dongFilter || hoFilter) {
-        // 동/호에서 비교 키를 추출
-        // DongNm: "101동", "제103동" → "101", "103"  /  "B동" → "B"  / "가동" → "가"
-        // HoNm: "10층 1005호", "1층 101호", "1005호" → "1005", "101", "1005"
-        const extractKey = (s: string): string =>
-          (s || '').trim().replace(/^제/, '').replace(/^\d+층\s*/, '').replace(/[동호]$/, '').replace(/^0+/, '') || '0';
+      if (ledgerType === '표제부') {
+        // ── 표제부: RegstrKindCd '1' 또는 '2' ──
+        const pyojeItems = resultList.filter((item: any) =>
+          item.RegstrKindCd === '1' || item.RegstrKindCd === '2'
+        );
+        console.log(`  표제부(1,2) 건수: ${pyojeItems.length}건`);
 
+        if (pyojeItems.length === 0) {
+          console.warn('  표제부 항목이 없습니다.');
+          return null;
+        }
+
+        if (dongFilter) {
+          const dongMatched = pyojeItems.find((item: any) => normalizeDong(item.DongNm, dongFilter));
+          if (dongMatched) {
+            matchedItem = dongMatched;
+            console.log(`  표제부 동 매칭: ${dongMatched.DongNm} (${dongMatched.RegstrKindNm})`);
+          } else {
+            const chonggwal = pyojeItems.find((item: any) => item.RegstrKindCd === '2');
+            matchedItem = chonggwal || pyojeItems[0];
+            console.log(`  표제부 동 매칭 실패 → ${matchedItem.RegstrKindNm || (matchedItem.RegstrKindCd === '2' ? '총괄표제부' : '일반표제부')} 사용`);
+          }
+        } else {
+          const chonggwal = pyojeItems.find((item: any) => item.RegstrKindCd === '2');
+          matchedItem = chonggwal || pyojeItems[0];
+          console.log(`  표제부 선택: ${matchedItem.RegstrKindNm || (matchedItem.RegstrKindCd === '2' ? '총괄표제부' : '일반표제부')}`);
+        }
+
+      } else if (dongFilter || hoFilter) {
+        // ── 전유부: RegstrKindCd '4', 동/호 매칭 ──
         const dongKey = extractKey(dongFilter);
         const hoKey = extractKey(hoFilter);
-
-        // 동 이름 정규화 매칭 (주동1 ↔ 101동, A동 ↔ 에이동 등)
-        const normalizeDong = (apiDong: string | null | undefined, userDong: string): boolean => {
-          const apiKey = extractKey(apiDong || '');
-          const userKey = extractKey(userDong);
-          if (apiKey === userKey) return true;
-
-          // "주동1" → 숫자 추출 "1", "101동" → "101" — 끝자리 비교
-          // "주동2" ↔ "102동" 패턴: API가 "주동N" 형태이고 사용자가 "10N동" 형태
-          const apiNumMatch = (apiDong || '').match(/(\d+)/);
-          const userNumMatch = (userDong || '').match(/(\d+)/);
-          if (apiNumMatch && userNumMatch) {
-            const apiNum = apiNumMatch[1];
-            const userNum = userNumMatch[1];
-            // "주동1" (1) ↔ "101동" (101): 끝자리가 같으면 매칭 시도
-            if (userNum.endsWith(apiNum) || apiNum.endsWith(userNum)) return true;
-          }
-
-          return false;
-        };
 
         const found = resultList.find((item: any) => {
           const dongMatch = !dongFilter || normalizeDong(item.DongNm, dongFilter);
           const hoMatch = !hoFilter || extractKey(item.HoNm) === hoKey;
-          return dongMatch && hoMatch && item.RegstrKindCd === '4'; // 전유부만
+          return dongMatch && hoMatch && item.RegstrKindCd === '4';
         });
 
         let geminiUsedForDong = false;
@@ -488,7 +545,6 @@ export class TilkoBuildingService {
           matchedItem = found;
           console.log(`  매칭 성공: ${found.DongNm} ${found.HoNm}`);
         } else {
-          // 디버그: 매칭 실패 시 상세 분석
           const allDongs = [...new Set(resultList.map((item: any) => item.DongNm))];
           const kindCodes = [...new Set(resultList.map((item: any) => item.RegstrKindCd))];
           const jeonyu = resultList.filter((item: any) => item.RegstrKindCd === '4');
@@ -501,7 +557,6 @@ export class TilkoBuildingService {
           console.warn(`  전유부(4) 건수: ${jeonyu.length}건`);
           console.warn(`  동(${dongKey}) 매칭 건수: ${dongMatched.length}건, 샘플:`, dongMatchedSample);
 
-          // Gemini 동 매칭 폴백
           if (this.geminiService && dongFilter && jeonyu.length > 0) {
             const uniqueDongs = [...new Set(jeonyu.map((item: any) => item.DongNm).filter(Boolean))] as string[];
             if (uniqueDongs.length > 0) {
@@ -552,11 +607,7 @@ export class TilkoBuildingService {
       };
 
     } catch (error: any) {
-      console.error('BldRgstDtl 조회 실패:', error.message);
-      if (error.response) {
-        console.error('응답 상태:', error.response.status);
-        console.error('응답 데이터:', JSON.stringify(error.response.data, null, 2));
-      }
+      console.error('BldRgstDtl 결과 처리 실패:', error.message);
       return null;
     }
   }

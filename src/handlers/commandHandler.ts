@@ -159,11 +159,47 @@ export function registerCommands(app: App): void {
         });
       }
 
-    } catch (error) {
+    } catch (error: any) {
       console.error('등기부등본 조회 실패:', error);
-      await replyInThread(client, channelId, threadTs,
-        '⚠️ 등기부등본 조회 중 오류가 발생했습니다.\n잠시 후 다시 시도해주세요.'
-      );
+      const errorMsg = error.message || '알 수 없는 오류';
+
+      if (String(errorMsg).includes('통신')) {
+        const retryMinutes = 5;
+        await replyInThread(client, channelId, threadTs,
+          `⚠️ 서버 일시 장애가 감지되었습니다.\n${retryMinutes}분 후 자동으로 재시도합니다.\n(사유: ${errorMsg})`
+        );
+
+        setTimeout(async () => {
+          try {
+            console.log(`[자동 재시도] 등기부등본: ${parsedAddress.fullAddress}`);
+            await replyInThread(client, channelId, threadTs,
+              `🔄 등기부등본 자동 재시도 중...\n주소: ${parsedAddress.fullAddress}`
+            );
+
+            const retryResult = await registryService.fetchRegistry(parsedAddress);
+            const retryFileName = generateFileName('등기부등본', parsedAddress);
+            const balText = retryResult.pointBalance != null ? `\n💰 잔여 포인트: ${retryResult.pointBalance.toLocaleString()}pt` : '';
+            const uTag = userId ? `\n👤 요청자: <@${userId}>` : '';
+
+            await client.files.uploadV2({
+              channel_id: channelId,
+              thread_ts: threadTs,
+              file: fs.createReadStream(retryResult.filePath),
+              filename: retryFileName,
+              initial_comment: `✅ 등기부등본 발급 완료 (자동 재시도 성공)${balText}${uTag}`
+            });
+          } catch (retryError: any) {
+            console.error('[자동 재시도] 등기부등본 재시도 실패:', retryError.message);
+            await replyInThread(client, channelId, threadTs,
+              `❌ 자동 재시도도 실패했습니다.\n사유: ${retryError.message}\n서버 장애가 지속되고 있습니다. 잠시 후 수동으로 다시 시도해주세요.`
+            );
+          }
+        }, retryMinutes * 60 * 1000);
+      } else {
+        await replyInThread(client, channelId, threadTs,
+          `⚠️ 등기부등본 조회 중 오류가 발생했습니다.\n사유: ${errorMsg}\n잠시 후 다시 시도해주세요.`
+        );
+      }
     }
   }
 
@@ -188,17 +224,8 @@ export function registerCommands(app: App): void {
       return;
     }
 
-    if (!parsedAddress.dong || !parsedAddress.ho) {
-      const recognized = summarizeParsed(parsedAddress);
-      const missing = [
-        !parsedAddress.dong ? '동' : '',
-        !parsedAddress.ho ? '호' : '',
-      ].filter(Boolean).join(', ');
-      await replyError(
-        `❌ ${missing}을(를) 인식할 수 없습니다.\n전유부 건축물대장은 동/호가 필요합니다.\n\n인식된 정보: ${recognized}\n\n💡 동과 호는 띄어쓰기로 구분해주세요. (예: 103동 904호)`
-      );
-      return;
-    }
+    // 동/호 유무에 따라 표제부/전유부 자동 결정
+    const ledgerType: '전유부' | '표제부' = (parsedAddress.dong && parsedAddress.ho) ? '전유부' : '표제부';
 
     // 주소 유효성 사전 검증 (무료)
     const validation = await validateAddressWithJuso(parsedAddress);
@@ -208,11 +235,11 @@ export function registerCommands(app: App): void {
     }
 
     await replyInThread(client, channelId, threadTs,
-      `🔍 건축물대장(전유부) 조회 중...\n주소: ${parsedAddress.fullAddress}`
+      `🔍 건축물대장(${ledgerType}) 조회 중...\n주소: ${parsedAddress.fullAddress}`
     );
 
     try {
-      const result = await buildingService.fetchBuildingLedger(parsedAddress);
+      const result = await buildingService.fetchBuildingLedger(parsedAddress, ledgerType);
       const fileName = generateFileName('건축물대장', parsedAddress);
 
       const balanceText = result.pointBalance != null ? `\n💰 잔여 포인트: ${result.pointBalance.toLocaleString()}pt` : '';
@@ -237,9 +264,46 @@ export function registerCommands(app: App): void {
     } catch (error: any) {
       console.error('건축물대장 조회 실패:', error);
       const errorMsg = error.message || '알 수 없는 오류';
-      await replyInThread(client, channelId, threadTs,
-        `⚠️ 건축물대장 조회 중 오류가 발생했습니다.\n사유: ${errorMsg}\n잠시 후 다시 시도해주세요.`
-      );
+
+      // 세움터 서버 통신 오류 감지 → 5분 후 자동 재시도 (1회)
+      if (String(errorMsg).includes('통신') && !(error as any)._retried) {
+        const retryMinutes = 5;
+        await replyInThread(client, channelId, threadTs,
+          `⚠️ 세움터 서버 일시 장애가 감지되었습니다.\n${retryMinutes}분 후 자동으로 재시도합니다.\n(사유: ${errorMsg})`
+        );
+
+        setTimeout(async () => {
+          try {
+            console.log(`[자동 재시도] 건축물대장: ${parsedAddress.fullAddress}`);
+            await replyInThread(client, channelId, threadTs,
+              `🔄 건축물대장 자동 재시도 중...\n주소: ${parsedAddress.fullAddress}`
+            );
+
+            const retryResult = await buildingService.fetchBuildingLedger(parsedAddress, ledgerType);
+            const retryFileName = generateFileName('건축물대장', parsedAddress);
+            const balText = retryResult.pointBalance != null ? `\n💰 잔여 포인트: ${retryResult.pointBalance.toLocaleString()}pt` : '';
+            const uTag = userId ? `\n👤 요청자: <@${userId}>` : '';
+            const gText = retryResult.geminiUsed ? '\n🤖 AI 보정을 통해 올바른 결과물이 추출되었습니다.' : '';
+
+            await client.files.uploadV2({
+              channel_id: channelId,
+              thread_ts: threadTs,
+              file: fs.createReadStream(retryResult.filePath),
+              filename: retryFileName,
+              initial_comment: `✅ 건축물대장(${ledgerType}) 발급 완료 (자동 재시도 성공)${gText}${balText}${uTag}`
+            });
+          } catch (retryError: any) {
+            console.error('[자동 재시도] 건축물대장 재시도 실패:', retryError.message);
+            await replyInThread(client, channelId, threadTs,
+              `❌ 자동 재시도도 실패했습니다.\n사유: ${retryError.message}\n세움터 서버 장애가 지속되고 있습니다. 잠시 후 수동으로 다시 시도해주세요.`
+            );
+          }
+        }, retryMinutes * 60 * 1000);
+      } else {
+        await replyInThread(client, channelId, threadTs,
+          `⚠️ 건축물대장 조회 중 오류가 발생했습니다.\n사유: ${errorMsg}\n잠시 후 다시 시도해주세요.`
+        );
+      }
     }
   }
 
@@ -267,17 +331,7 @@ export function registerCommands(app: App): void {
       return;
     }
 
-    if (!parsedAddress.dong || !parsedAddress.ho) {
-      const recognized = summarizeParsed(parsedAddress);
-      const missing = [
-        !parsedAddress.dong ? '동' : '',
-        !parsedAddress.ho ? '호' : '',
-      ].filter(Boolean).join(', ');
-      await replyError(
-        `❌ ${missing}을(를) 인식할 수 없습니다.\n건축물대장(전유부) 조회에는 동/호가 필요합니다.\n\n인식된 정보: ${recognized}\n\n💡 동과 호는 띄어쓰기로 구분해주세요. (예: 103동 904호)`
-      );
-      return;
-    }
+    const allLedgerType: '전유부' | '표제부' = (parsedAddress.dong && parsedAddress.ho) ? '전유부' : '표제부';
 
     // 주소 유효성 사전 검증 (무료)
     const validation = await validateAddressWithJuso(parsedAddress);
@@ -314,14 +368,14 @@ export function registerCommands(app: App): void {
         `🔍 등기부등본 조회 중...\n주소: ${parsedAddress.fullAddress}`
       );
       await replyInThread(client, channelId, buildingThreadTs,
-        `🔍 건축물대장(전유부) 조회 중...\n주소: ${parsedAddress.fullAddress}\n⏳ 잠시만 기다려주세요`
+        `🔍 건축물대장(${allLedgerType}) 조회 중...\n주소: ${parsedAddress.fullAddress}\n⏳ 잠시만 기다려주세요`
       );
     }
 
     // 동시 조회
     const [registryResult, buildingResult] = await Promise.allSettled([
       registryService.fetchRegistry(parsedAddress),
-      buildingService.fetchBuildingLedger(parsedAddress)
+      buildingService.fetchBuildingLedger(parsedAddress, allLedgerType)
     ]);
 
     const issued: string[] = [];
@@ -350,10 +404,31 @@ export function registerCommands(app: App): void {
         );
       }
     } else {
+      const regErrMsg = registryResult.reason?.message || '알 수 없는 오류';
       console.error('등기부등본 조회 실패:', registryResult.reason);
-      await replyInThread(client, channelId, registryThreadTs,
-        `⚠️ 등기부등본 조회 실패\n사유: ${registryResult.reason?.message || '알 수 없는 오류'}`
-      );
+
+      if (String(regErrMsg).includes('통신')) {
+        await replyInThread(client, channelId, registryThreadTs,
+          `⚠️ 서버 일시 장애가 감지되었습니다. 5분 후 자동 재시도합니다.`
+        );
+        setTimeout(async () => {
+          try {
+            await replyInThread(client, channelId, registryThreadTs, `🔄 등기부등본 자동 재시도 중...`);
+            const r = await registryService.fetchRegistry(parsedAddress);
+            const fn = generateFileName('등기부등본', parsedAddress);
+            const bt = r.pointBalance != null ? `\n💰 잔여 포인트: ${r.pointBalance.toLocaleString()}pt` : '';
+            await client.files.uploadV2({
+              channel_id: channelId, thread_ts: registryThreadTs,
+              file: fs.createReadStream(r.filePath), filename: fn,
+              initial_comment: `✅ 등기부등본 발급 완료 (자동 재시도 성공)${bt}${userTag}`
+            });
+          } catch (e: any) {
+            await replyInThread(client, channelId, registryThreadTs, `❌ 자동 재시도도 실패했습니다.\n사유: ${e.message}`);
+          }
+        }, 5 * 60 * 1000);
+      } else {
+        await replyInThread(client, channelId, registryThreadTs, `⚠️ 등기부등본 조회 실패\n사유: ${regErrMsg}`);
+      }
     }
 
     // 건축물대장 → 건축물 스레드에 결과
@@ -379,10 +454,32 @@ export function registerCommands(app: App): void {
         );
       }
     } else {
+      const bldErrMsg = buildingResult.reason?.message || '알 수 없는 오류';
       console.error('건축물대장 조회 실패:', buildingResult.reason);
-      await replyInThread(client, channelId, buildingThreadTs,
-        `⚠️ 건축물대장 조회 실패\n사유: ${buildingResult.reason?.message || '알 수 없는 오류'}`
-      );
+
+      if (String(bldErrMsg).includes('통신')) {
+        await replyInThread(client, channelId, buildingThreadTs,
+          `⚠️ 세움터 서버 일시 장애가 감지되었습니다. 5분 후 자동 재시도합니다.`
+        );
+        setTimeout(async () => {
+          try {
+            await replyInThread(client, channelId, buildingThreadTs, `🔄 건축물대장 자동 재시도 중...`);
+            const r = await buildingService.fetchBuildingLedger(parsedAddress, allLedgerType);
+            const fn = generateFileName('건축물대장', parsedAddress);
+            const bt = r.pointBalance != null ? `\n💰 잔여 포인트: ${r.pointBalance.toLocaleString()}pt` : '';
+            const gt = r.geminiUsed ? '\n🤖 AI 보정을 통해 올바른 결과물이 추출되었습니다.' : '';
+            await client.files.uploadV2({
+              channel_id: channelId, thread_ts: buildingThreadTs,
+              file: fs.createReadStream(r.filePath), filename: fn,
+              initial_comment: `✅ 건축물대장 발급 완료 (자동 재시도 성공)${gt}${bt}${userTag}`
+            });
+          } catch (e: any) {
+            await replyInThread(client, channelId, buildingThreadTs, `❌ 자동 재시도도 실패했습니다.\n사유: ${e.message}`);
+          }
+        }, 5 * 60 * 1000);
+      } else {
+        await replyInThread(client, channelId, buildingThreadTs, `⚠️ 건축물대장 조회 실패\n사유: ${bldErrMsg}`);
+      }
     }
 
     // 채널 본문에 발급 사실 알림 (앱 멘션일 때만)
